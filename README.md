@@ -20,3 +20,12 @@ Download and review the script:
 curl -fsSL -o setup_autodarts.sh https://raw.githubusercontent.com/Leontech/autodarts/main/setup_autodarts.sh
 chmod +x setup_autodarts.sh
 sudo ./setup_autodarts.sh
+
+## Dry-run mode (safe test)
+
+You can run the script in **dry-run mode** to see what it would do,
+without changing your system.
+
+```bash
+sudo ./setup_autodarts.sh --dry-run
+
