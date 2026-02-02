@@ -1,121 +1,199 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DRY_RUN=0
+# ------------------------------------------------------------
+# Autodarts setup script
+# - --dry-run: prints actions only
+# - --ports "cam1,cam2,cam3": USB port paths (KERNELS==...), default below
+# - Disables Autodarts autostart services (does NOT mask them)
+# - Installs stable udev symlinks /dev/autodarts_cam1..3
+# - Installs safe camera init script + systemd oneshot service
+# - Ensures www-browser points to Chromium (if available/installed)
+# ------------------------------------------------------------
 
-for arg in "$@"; do
-  case "$arg" in
-    --dry-run)
-      DRY_RUN=1
-      ;;
-    *)
-      ;;
-  esac
-done
+DRY_RUN=0
+DISABLE_UPDATER=0
+
+# Default USB port paths (edit via --ports)
+PORT_CAM1="1-1:1.0"
+PORT_CAM2="3-1:1.0"
+PORT_CAM3="3-2:1.0"
 
 GREEN="\033[0;32m"; YELLOW="\033[1;33m"; RED="\033[0;31m"; NC="\033[0m"
 log()  { echo -e "${GREEN}==>${NC} $*"; }
 warn() { echo -e "${YELLOW}==>${NC} $*"; }
 err()  { echo -e "${RED}==>${NC} $*"; }
 
-run() {
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[DRY-RUN] $*"
-  else
-    eval "$@"
-  fi
+usage() {
+  cat <<EOF
+Usage:
+  sudo ./setup_autodarts.sh [--dry-run] [--ports "P1,P2,P3"] [--disable-updater] [--help]
+
+Options:
+  --dry-run            Show what would be done, but do not change the system
+  --ports "P1,P2,P3"   USB port paths for cam1,cam2,cam3 (KERNELS==...), e.g.:
+                       --ports "1-1:1.0,3-1:1.0,3-2:1.0"
+  --disable-updater    Also disable autodartsupdater.service (default: keep enabled)
+  --help               Show this help
+
+How to find port paths:
+  udevadm info -a -n /dev/video0 | grep 'KERNELS=="[0-9]-[0-9].*:[0-9]\\.[0-9]"'
+EOF
 }
 
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
 require_root() {
-  if [ "${EUID}" -ne 0 ]; then
+  if [[ "${EUID}" -ne 0 ]]; then
     err "Please run as root (use sudo)."
     exit 1
   fi
 }
 
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
+# Safe runner: no eval, supports dry-run.
+run() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[DRY-RUN] $*"
+    return 0
+  fi
+  "$@"
+}
 
-log "Autodarts setup starting"
-[ "$DRY_RUN" -eq 1 ] && warn "Running in DRY-RUN mode (no changes will be made)"
+# Run a command through shell only when needed (multi-line heredoc writes).
+run_sh() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[DRY-RUN] $*"
+    return 0
+  fi
+  bash -lc "$*"
+}
 
-# ------------------------------------------------------------
-# Packages
-# ------------------------------------------------------------
-log "Installing base packages"
-run "apt-get update -y"
-run "apt-get install -y v4l-utils xdg-utils udev"
-
-# ------------------------------------------------------------
-# Browser (Chromium)
-# ------------------------------------------------------------
-if have_cmd chromium-browser; then
-  CHROMIUM=$(command -v chromium-browser)
-elif have_cmd chromium; then
-  CHROMIUM=$(command -v chromium)
-else
-  warn "Chromium not found – attempting install"
-  run "apt-get install -y chromium-browser || apt-get install -y chromium"
-  CHROMIUM=$(command -v chromium-browser || command -v chromium || true)
-fi
-
-if [ -n "${CHROMIUM:-}" ]; then
-  log "Setting default browser to Chromium"
-  run "update-alternatives --install /usr/bin/www-browser www-browser $CHROMIUM 200"
-  run "update-alternatives --install /usr/bin/x-www-browser x-www-browser $CHROMIUM 200"
-  run "update-alternatives --auto www-browser"
-  run "update-alternatives --auto x-www-browser"
-fi
-
-# ------------------------------------------------------------
-# Disable conflicting Autodarts services
-# ------------------------------------------------------------
-for svc in autodarts.service darts-hub.service autodartsupdater.service autodarts-desktop.service; do
-  if systemctl list-unit-files | awk '{print $1}' | grep -qx "$svc"; then
-    warn "Disabling service: $svc"
-    run "systemctl disable --now $svc"
-    case "$svc" in
-      autodarts.service|darts-hub.service)
-        run "systemctl mask $svc"
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --disable-updater)
+        DISABLE_UPDATER=1
+        shift
+        ;;
+      --ports)
+        [[ $# -ge 2 ]] || { err "--ports requires a value"; exit 1; }
+        IFS=',' read -r PORT_CAM1 PORT_CAM2 PORT_CAM3 <<<"$2"
+        if [[ -z "${PORT_CAM1}" || -z "${PORT_CAM2}" || -z "${PORT_CAM3}" ]]; then
+          err "Invalid --ports value. Expected 3 comma-separated items."
+          exit 1
+        fi
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        err "Unknown argument: $1"
+        usage
+        exit 1
         ;;
     esac
-  fi
-done
+  done
+}
 
-# ------------------------------------------------------------
-# udev camera rules
-# ------------------------------------------------------------
-log "Writing udev rules for stable camera names"
-run "cat > /etc/udev/rules.d/99-autodarts-cameras.rules <<'EOF'
-SUBSYSTEM==\"video4linux\", KERNEL==\"video*\", KERNELS==\"1-1:1.0\", SYMLINK+=\"autodarts_cam1\"
-SUBSYSTEM==\"video4linux\", KERNEL==\"video*\", KERNELS==\"3-1:1.0\", SYMLINK+=\"autodarts_cam2\"
-SUBSYSTEM==\"video4linux\", KERNEL==\"video*\", KERNELS==\"3-2:1.0\", SYMLINK+=\"autodarts_cam3\"
+install_packages() {
+  log "Installing base packages"
+  run apt-get update -y
+  run apt-get install -y v4l-utils xdg-utils udev
+}
+
+ensure_chromium_default_browser() {
+  local CHROMIUM=""
+  if have_cmd chromium-browser; then
+    CHROMIUM="$(command -v chromium-browser)"
+  elif have_cmd chromium; then
+    CHROMIUM="$(command -v chromium)"
+  else
+    warn "Chromium not found – attempting install (best-effort)"
+    # Best-effort: Debian/RPi may provide chromium-browser, Ubuntu may differ.
+    run_sh "apt-get install -y chromium-browser || apt-get install -y chromium || true"
+    CHROMIUM="$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${CHROMIUM}" ]]; then
+    log "Setting default browser to Chromium (${CHROMIUM})"
+    run update-alternatives --install /usr/bin/www-browser www-browser "${CHROMIUM}" 200
+    run update-alternatives --install /usr/bin/x-www-browser x-www-browser "${CHROMIUM}" 200
+    run update-alternatives --auto www-browser
+    run update-alternatives --auto x-www-browser
+  else
+    warn "Chromium not available. If Autodarts login opens in lynx, install Chromium and re-run."
+  fi
+}
+
+disable_autostart_services() {
+  log "Disabling Autodarts autostart services (no masking)"
+  local services=(autodarts.service darts-hub.service autodarts-desktop.service)
+
+  for svc in "${services[@]}"; do
+    if systemctl list-unit-files --type=service | awk '{print $1}' | grep -qx "${svc}"; then
+      warn "Disabling service: ${svc}"
+      run systemctl disable --now "${svc}"
+    fi
+  done
+
+  if systemctl list-unit-files --type=service | awk '{print $1}' | grep -qx "autodartsupdater.service"; then
+    if [[ "${DISABLE_UPDATER}" -eq 1 ]]; then
+      warn "Disabling service: autodartsupdater.service (requested)"
+      run systemctl disable --now autodartsupdater.service
+    else
+      warn "autodartsupdater.service exists (left enabled). Use --disable-updater to disable it."
+    fi
+  fi
+}
+
+write_udev_rules() {
+  log "Writing udev rules for stable camera names"
+  log "Using ports: cam1=${PORT_CAM1}, cam2=${PORT_CAM2}, cam3=${PORT_CAM3}"
+
+  run_sh "cat > /etc/udev/rules.d/99-autodarts-cameras.rules <<'EOF'
+# Autodarts stable camera symlinks
+# Generated by setup_autodarts.sh
+SUBSYSTEM==\"video4linux\", KERNEL==\"video*\", KERNELS==\"${PORT_CAM1}\", SYMLINK+=\"autodarts_cam1\"
+SUBSYSTEM==\"video4linux\", KERNEL==\"video*\", KERNELS==\"${PORT_CAM2}\", SYMLINK+=\"autodarts_cam2\"
+SUBSYSTEM==\"video4linux\", KERNEL==\"video*\", KERNELS==\"${PORT_CAM3}\", SYMLINK+=\"autodarts_cam3\"
 EOF"
 
-run "udevadm control --reload-rules"
-run "udevadm trigger --subsystem-match=video4linux"
+  run udevadm control --reload-rules
+  run udevadm trigger --subsystem-match=video4linux
+}
 
-# ------------------------------------------------------------
-# Camera init script
-# ------------------------------------------------------------
-log "Installing camera init script"
-run "cat > /usr/local/bin/autodarts-cameras.sh <<'EOF'
+write_camera_script() {
+  log "Installing camera init script (/usr/local/bin/autodarts-cameras.sh)"
+
+  run_sh "cat > /usr/local/bin/autodarts-cameras.sh <<'EOF'
 #!/bin/bash
+# SAFE camera init for Autodarts (UVC-friendly)
+set -e
+
 sleep 2
+
 for cam in /dev/autodarts_cam1 /dev/autodarts_cam2 /dev/autodarts_cam3; do
   [ -e \"\$cam\" ] || continue
+  echo \"Configuring \$cam\"
   v4l2-ctl -d \"\$cam\" -c auto_exposure=3 || true
   v4l2-ctl -d \"\$cam\" -c exposure_dynamic_framerate=0 || true
   v4l2-ctl -d \"\$cam\" -c white_balance_automatic=1 || true
 done
 EOF"
 
-run "chmod +x /usr/local/bin/autodarts-cameras.sh"
+  run chmod +x /usr/local/bin/autodarts-cameras.sh
+}
 
-# ------------------------------------------------------------
-# systemd service
-# ------------------------------------------------------------
-log "Installing systemd camera service"
-run "cat > /etc/systemd/system/autodarts-cameras.service <<'EOF'
+write_systemd_service() {
+  log "Installing systemd service (/etc/systemd/system/autodarts-cameras.service)"
+
+  run_sh "cat > /etc/systemd/system/autodarts-cameras.service <<'EOF'
 [Unit]
 Description=Autodarts camera stable settings
 After=systemd-udev-settle.service
@@ -129,9 +207,38 @@ ExecStart=/usr/local/bin/autodarts-cameras.sh
 WantedBy=multi-user.target
 EOF"
 
-run "systemctl daemon-reload"
-run "systemctl enable autodarts-cameras.service"
-run "systemctl restart autodarts-cameras.service"
+  run systemctl daemon-reload
+  run systemctl enable autodarts-cameras.service
+  run systemctl restart autodarts-cameras.service
+}
 
-log "Autodarts setup finished"
-[ "$DRY_RUN" -eq 1 ] && warn "No changes were made (dry-run)"
+summary() {
+  log "Done."
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    warn "No changes were made (dry-run)."
+    return 0
+  fi
+
+  echo
+  log "Check results:"
+  ls -l /dev/autodarts_cam* 2>/dev/null || warn "Symlinks not present yet (replug cameras or reboot)."
+  systemctl status autodarts-cameras.service --no-pager || true
+}
+
+main() {
+  parse_args "$@"
+  require_root
+
+  log "Autodarts setup starting"
+  [[ "$DRY_RUN" -eq 1 ]] && warn "Running in DRY-RUN mode (no changes will be made)"
+
+  install_packages
+  ensure_chromium_default_browser
+  disable_autostart_services
+  write_udev_rules
+  write_camera_script
+  write_systemd_service
+  summary
+}
+
+main "$@"
