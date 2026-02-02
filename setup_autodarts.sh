@@ -172,23 +172,29 @@ write_camera_script() {
   log "Installing camera init script (/usr/local/bin/autodarts-cameras.sh)"
 
   run_sh "cat > /usr/local/bin/autodarts-cameras.sh <<'EOF'
-#!/bin/bash
-# SAFE camera init for Autodarts (UVC-friendly)
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
+
+# SAFE DEFAULT:
+# Do not change any camera controls automatically.
+# This prevents 'ghost darts' caused by forced camera settings.
 
 sleep 2
 
 for cam in /dev/autodarts_cam1 /dev/autodarts_cam2 /dev/autodarts_cam3; do
-  [ -e \"\$cam\" ] || continue
-  echo \"Configuring \$cam\"
-  v4l2-ctl -d \"\$cam\" -c auto_exposure=3 || true
-  v4l2-ctl -d \"\$cam\" -c exposure_dynamic_framerate=0 || true
-  v4l2-ctl -d \"\$cam\" -c white_balance_automatic=1 || true
+  if [[ -e \"\$cam\" ]]; then
+    echo \"Autodarts camera init: found \$cam (no settings changed)\"
+    # OPTIONAL (enable only if you know you want it):
+    # v4l2-ctl -d \"\$cam\" -c auto_exposure=3 || true
+  else
+    echo \"Autodarts camera init: missing \$cam\"
+  fi
 done
 EOF"
 
   run chmod +x /usr/local/bin/autodarts-cameras.sh
 }
+
 
 write_systemd_service() {
   log "Installing systemd service (/etc/systemd/system/autodarts-cameras.service)"
