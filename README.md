@@ -1,7 +1,11 @@
-# Autodarts Ubuntu Setup
+# Autodarts Ubuntu Setup (SAFE camera version)
 
-Automatizovaný instalační a stabilizační skript pro Autodarts  
+Automatizovaný instalační a stabilizační skript pro **Autodarts**
 (Ubuntu / Debian / Raspberry Pi OS)
+
+⚠️ Tato verze je **SAFE BY DEFAULT**  
+➡️ **NEMĚNÍ žádná V4L2 nastavení kamer**, aby nedocházelo k falešným zásahům
+(„ghost darts“).
 
 ---
 
@@ -10,13 +14,21 @@ Automatizovaný instalační a stabilizační skript pro Autodarts
 - Ubuntu 20.04+ / Debian 11+ / Raspberry Pi OS (Bookworm)
 - 3× USB kamera (UVC)
 - připojení k internetu
-- uživatel se sudo právy
+- uživatel se `sudo` právy
 
 ---
 
-## ⬇️ Kompletní postup (DRY-RUN → instalace → ověření → UNDO)
+## 🎯 Co tento projekt řeší
 
-Vše je psané tak, aby šlo jet **shora dolů bez přemýšlení**.
+- stabilní názvy USB kamer (`/dev/autodarts_cam1..3`)
+- zabránění vícenásobnému spouštění Autodarts procesů
+- správné otevření Autodarts přihlášení v grafickém prohlížeči
+- konzistentní chování po rebootu
+- **žádné zásahy do obrazu kamer (default)**
+
+---
+
+## ⬇️ KOMPLETNÍ POSTUP (JEDEN COPY – SHORA DOLŮ)
 
 ### 1️⃣ Stažení instalačního skriptu
 
@@ -26,9 +38,9 @@ Vše je psané tak, aby šlo jet **shora dolů bez přemýšlení**.
 
 ---
 
-### 2️⃣ Testovací režim (DRY-RUN)
+### 2️⃣ Testovací režim (DRY-RUN – nic nemění)
 
-Dry-run **nic nemění**, pouze vypíše, co by skript provedl.
+Doporučeno vždy spustit jako první.
 
     sudo ./setup_autodarts.sh --dry-run
 
@@ -56,21 +68,7 @@ Očekávaný výstup:
 
 ---
 
-### 5️⃣ Ověření nastavení kamer (bez blikání)
-
-    v4l2-ctl -d /dev/autodarts_cam1 --get-ctrl=auto_exposure
-    v4l2-ctl -d /dev/autodarts_cam1 --get-ctrl=exposure_dynamic_framerate
-    v4l2-ctl -d /dev/autodarts_cam1 --get-ctrl=white_balance_automatic
-
-Správné hodnoty:
-
-    auto_exposure: 3
-    exposure_dynamic_framerate: 0
-    white_balance_automatic: 1
-
----
-
-### 6️⃣ Stav systemd služby pro kamery
+### 5️⃣ Stav systemd služby pro kamery
 
     systemctl status autodarts-cameras.service
 
@@ -80,11 +78,62 @@ Log služby:
 
 ---
 
-### 7️⃣ Test otevření Autodarts webu
+### 6️⃣ Test otevření Autodarts webu
 
     xdg-open https://autodarts.io
 
 Musí se otevřít **grafické okno prohlížeče (Chromium)**.
+
+---
+
+## 🎥 Nastavení kamer – DŮLEŽITÉ
+
+### ✅ Výchozí chování (doporučeno)
+
+Projekt **NEMĚNÍ žádná V4L2 nastavení kamer**.
+
+Důvod:
+- změny expozice / frameratu / white balance
+- mohou způsobit falešné detekce („ghost darts“)
+- Autodarts funguje nejlépe s přirozeným obrazem z kamery
+
+Výchozí skript pouze:
+- ověří přítomnost kamer
+- zapíše informaci do logu
+
+Soubor:
+
+    /usr/local/bin/autodarts-cameras.sh
+
+---
+
+### ⚠️ Pokročilé – manuální zásah (NA VLASTNÍ RIZIKO)
+
+Pokud **VÍŠ, CO DĚLÁŠ**, můžeš ručně povolit zásah do kamer:
+
+    sudo nano /usr/local/bin/autodarts-cameras.sh
+
+Odkomentuj například:
+
+    v4l2-ctl -d "$cam" -c auto_exposure=3
+
+A restartuj službu:
+
+    sudo systemctl restart autodarts-cameras.service
+
+❗ Pokud se objeví falešné zásahy, vrať skript do původního stavu.
+
+---
+
+## 🛑 Zakázané automatické služby
+
+Skript zakáže automatické spouštění těchto služeb (pokud existují):
+
+- autodarts.service
+- darts-hub.service
+- autodarts-desktop.service
+
+Updater **zůstává zapnutý**.
 
 ---
 
@@ -104,10 +153,7 @@ Pokud se chceš vrátit do původního stavu:
 ## ⚠️ Poznámky
 
 - Skript **neinstaluje Autodarts Desktop**
-- Pouze:
-  - stabilizuje USB kamery
-  - nastaví bezpečné V4L2 hodnoty
-  - zabrání vícenásobnému startu služeb
+- Pouze stabilizuje systém a zařízení
 - Bezpečné pro opakované spuštění
 - Ověřeno na Raspberry Pi i PC
 
